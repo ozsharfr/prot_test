@@ -1,0 +1,30 @@
+# Phase 1: Flexibility vs. DDG Prediction Error
+# Python >= 3.11 recommended
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# FoldX is NOT pip-installable — register and download the binary at:
+#   https://foldxsuite.crg.eu
+# Then set the FOLDX_BIN environment variable:
+#   export FOLDX_BIN=/path/to/foldx
+#
+# Note: versions are intentionally unpinned so pip can resolve
+# compatible combinations (prody's numpy constraint is overly strict).
+
+# --- Structural bioinformatics ---
+prody>=2.4             # ANM / GNM / NMA — core flexibility engine
+biopython>=1.81        # PDB fetching, structure parsing, sequence tools
+
+# --- Data and numerics ---
+numpy>=1.23            # prody works fine with 1.23+
+pandas>=2.0
+scipy>=1.10
+
+# --- Plotting ---
+matplotlib>=3.7
+seaborn>=0.13
+
+# --- Utilities ---
+requests>=2.28         # fallback PDB download if BioPython fails
+tqdm>=4.65             # progress bars for long FoldX batch runs
