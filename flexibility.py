@@ -9,25 +9,37 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 import prody
-from prody.measure import findNeighbors
-
 from config import ANM_MODES, INTERFACE_CUTOFF
 
 log = logging.getLogger(__name__)
+
+# Suppress ProDy's verbose output
+prody.confProDy(verbosity="none")
 
 
 def get_interface_residues(structure: prody.AtomGroup, chain: str) -> set[int]:
     """
     Return residue numbers in `chain` that are within INTERFACE_CUTOFF Å
     of any atom in any other chain.
+    Uses pure NumPy distance calculation to avoid ProDy KDTree dtype bug on Windows.
     """
     chain_sel   = structure.select(f"chain {chain} and calpha")
     partner_sel = structure.select(f"not chain {chain} and calpha")
     if chain_sel is None or partner_sel is None:
+        log.warning("Could not select chain %s or partner — no interface residues found", chain)
         return set()
 
-    contacts = findNeighbors(chain_sel, INTERFACE_CUTOFF, partner_sel)
-    return {pair[0].getResnum() for pair in contacts}
+    chain_coords   = chain_sel.getCoords().astype("float64")    # (N, 3)
+    partner_coords = partner_sel.getCoords().astype("float64")  # (M, 3)
+    chain_resnums  = chain_sel.getResnums()
+
+    interface = set()
+    for i, coord in enumerate(chain_coords):
+        diffs = partner_coords - coord          # (M, 3)
+        dists = np.sqrt(np.sum(diffs ** 2, axis=1))
+        if np.any(dists <= INTERFACE_CUTOFF):
+            interface.add(int(chain_resnums[i]))
+    return interface
 
 
 def compute_anm_msf(pdb_path: Path, chain: str) -> pd.DataFrame:
@@ -35,14 +47,7 @@ def compute_anm_msf(pdb_path: Path, chain: str) -> pd.DataFrame:
     Run ANM on the full complex (Cα only) and return per-residue flexibility
     scores for residues in the specified chain.
 
-    ANM is run on the whole complex so that interface rigidification caused
-    by the partner chain is captured in the flexibility estimate.
-
-    Returns DataFrame with columns:
-        resnum        — residue number
-        msf           — raw mean square fluctuation
-        msf_z         — z-score normalized MSF within the chain
-        is_interface  — whether residue is within INTERFACE_CUTOFF of partner
+    Returns DataFrame with columns: resnum, msf, msf_z, is_interface
     """
     log.info("Running ANM on %s (chain %s)", pdb_path.name, chain)
 
@@ -54,28 +59,34 @@ def compute_anm_msf(pdb_path: Path, chain: str) -> pd.DataFrame:
     if calpha is None:
         raise ValueError(f"No Cα atoms found in {pdb_path}")
 
+    log.info("  Cα atoms: %d across chains: %s",
+             calpha.numAtoms(), list(set(calpha.getChids())))
+
     anm = prody.ANM(str(pdb_path))
     anm.buildHessian(calpha)
     anm.calcModes(n_modes=ANM_MODES)
-
     msf_values = prody.calcSqFlucts(anm)
     interface_resnums = get_interface_residues(structure, chain)
+    log.info("  Interface residues in chain %s: %d", chain, len(interface_resnums))
 
     records = []
     for i, (resnum, msf) in enumerate(zip(calpha.getResnums(), msf_values)):
         if calpha.getChids()[i] != chain:
             continue
         records.append({
-            "resnum":       resnum,
-            "msf":          msf,
+            "resnum":       int(resnum),
+            "msf":          float(msf),
             "is_interface": resnum in interface_resnums,
         })
 
-    df = pd.DataFrame(records)
-    if df.empty:
-        return df
+    if not records:
+        log.warning("  No residues found for chain %s in %s", chain, pdb_path.name)
+        return pd.DataFrame(columns=["resnum", "msf", "msf_z", "is_interface"])
 
+    df = pd.DataFrame(records)
     df["msf_z"] = stats.zscore(df["msf"]) if len(df) > 1 else 0.0
+    log.info("  Processed %d residues (%d interface)",
+             len(df), df["is_interface"].sum())
     return df
 
 
@@ -91,24 +102,45 @@ def assign_flexibility_to_mutations(
     """
     cache: dict[str, pd.DataFrame] = {}
 
-    def _lookup(row: pd.Series) -> pd.Series:
+    msf_list          = []
+    msf_z_list        = []
+    is_interface_list = []
+
+    for _, row in skempi.iterrows():
         key = f"{row['pdb_id']}_{row['chain']}"
+
         if key not in cache:
             pdb_path = pdb_paths.get(row["pdb_id"])
             if pdb_path is None or not pdb_path.exists():
+                log.warning("No PDB file for %s — skipping ANM", row["pdb_id"])
                 cache[key] = pd.DataFrame(columns=["resnum", "msf", "msf_z", "is_interface"])
             else:
                 try:
                     cache[key] = compute_anm_msf(pdb_path, row["chain"])
                 except Exception as e:
+                    import traceback
+                    traceback.print_exc()
                     log.warning("ANM failed for %s: %s", key, e)
                     cache[key] = pd.DataFrame(columns=["resnum", "msf", "msf_z", "is_interface"])
 
-        match = cache[key][cache[key]["resnum"] == row["resnum"]]
-        if match.empty:
-            return pd.Series({"msf": float("nan"), "msf_z": float("nan"), "is_interface": False})
-        return match.iloc[0][["msf", "msf_z", "is_interface"]]
+        anm_df = cache[key]
+        match  = anm_df[anm_df["resnum"] == row["resnum"]]
 
-    log.info("Assigning ANM flexibility scores to %d mutations...", len(skempi))
-    msf_cols = skempi.apply(_lookup, axis=1)
-    return pd.concat([skempi, msf_cols], axis=1)
+        if match.empty:
+            msf_list.append(np.nan)
+            msf_z_list.append(np.nan)
+            is_interface_list.append(False)
+        else:
+            msf_list.append(match.iloc[0]["msf"])
+            msf_z_list.append(match.iloc[0]["msf_z"])
+            is_interface_list.append(bool(match.iloc[0]["is_interface"]))
+
+    skempi = skempi.copy()
+    skempi["msf"]          = msf_list
+    skempi["msf_z"]        = msf_z_list
+    skempi["is_interface"] = is_interface_list
+
+    log.info("Flexibility assigned: %d/%d mutations have ANM scores, %d at interface",
+             skempi["msf"].notna().sum(), len(skempi), skempi["is_interface"].sum())
+
+    return skempi

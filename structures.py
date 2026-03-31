@@ -61,3 +61,27 @@ if __name__ == "__main__":
     test_ids = ["1A22", "2B3E", "3C4D"]
     fetched = fetch_structures(test_ids)
     print(f"Fetched structures: {fetched}")
+
+
+def fetch_resolutions(pdb_ids: list[str]) -> dict[str, float]:
+    """
+    Fetch crystal resolution (Å) for each PDB ID from RCSB's REST API.
+    Returns {pdb_id: resolution}. Missing entries are omitted.
+    """
+    import json
+    resolutions = {}
+    for pdb_id in pdb_ids:
+        try:
+            url = f"https://data.rcsb.org/rest/v1/core/entry/{pdb_id.lower()}"
+            r = requests.get(url, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+            res = (
+                data.get("refine", [{}])[0].get("ls_d_res_high") or
+                data.get("reflns", [{}])[0].get("d_resolution_high")
+            )
+            if res is not None:
+                resolutions[pdb_id] = float(res)
+        except Exception as e:
+            log.debug("Could not fetch resolution for %s: %s", pdb_id, e)
+    return resolutions

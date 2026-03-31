@@ -1,5 +1,7 @@
 .venv/
 .venv
+data/structures/
+data/foldx_runs/
 __pycache__/
 *.pyc
 *.pyo
