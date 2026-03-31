@@ -19,10 +19,10 @@ from collections import Counter
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
 
-SKEMPI_CSV       = Path("data/skempi_v2.csv")
+SKEMPI_CSV       = Path("../data/skempi_v2.csv")
 MIN_MUTATIONS    = 10     # minimum single-point mutations per complex
 RESOLUTION_MAX   = 6.0   # Angstrom
-TOP_N            = 15    # how many candidates to show
+TOP_N            = 25    # how many candidates to show
 
 # ---------------------------------------------------------------------------
 # Load and filter SKEMPI

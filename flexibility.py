@@ -90,21 +90,48 @@ def compute_anm_msf(pdb_path: Path, chain: str) -> pd.DataFrame:
     return df
 
 
+def _neighbor_msf(anm_df: pd.DataFrame, resnum: int, window: int) -> float:
+    """
+    Average msf_z of residues within +/- window positions of resnum
+    (excluding the residue itself). Uses sequential position index,
+    not residue number, to handle gaps in numbering correctly.
+    """
+    if anm_df.empty:
+        return np.nan
+    # Find the positional index of this residue
+    idx_matches = anm_df.index[anm_df["resnum"] == resnum].tolist()
+    if not idx_matches:
+        return np.nan
+    pos = anm_df.index.get_loc(idx_matches[0])
+    lo  = max(0, pos - window)
+    hi  = min(len(anm_df), pos + window + 1)
+    neighbors = anm_df.iloc[lo:hi]
+    neighbors = neighbors[neighbors["resnum"] != resnum]
+    return float(neighbors["msf_z"].mean()) if len(neighbors) > 0 else np.nan
+
+
 def assign_flexibility_to_mutations(
     skempi: pd.DataFrame,
     pdb_paths: dict[str, Path],
+    neighbor_windows: list[int] = [2, 4],
 ) -> pd.DataFrame:
     """
-    For each mutation in skempi, look up the ANM MSF of the mutated residue.
+    For each mutation in skempi, look up the ANM MSF of the mutated residue
+    and compute neighborhood flexibility scores.
     Caches ANM results per (pdb_id, chain) to avoid redundant computation.
 
-    Adds columns: msf, msf_z, is_interface
+    Adds columns:
+        msf, msf_z          — residue-level flexibility
+        is_interface        — within INTERFACE_CUTOFF of partner chain
+        msf_z_neighbors_2   — mean msf_z of ±2 sequence neighbors
+        msf_z_neighbors_4   — mean msf_z of ±4 sequence neighbors
     """
     cache: dict[str, pd.DataFrame] = {}
 
     msf_list          = []
     msf_z_list        = []
     is_interface_list = []
+    neighbor_lists    = {w: [] for w in neighbor_windows}
 
     for _, row in skempi.iterrows():
         key = f"{row['pdb_id']}_{row['chain']}"
@@ -130,15 +157,21 @@ def assign_flexibility_to_mutations(
             msf_list.append(np.nan)
             msf_z_list.append(np.nan)
             is_interface_list.append(False)
+            for w in neighbor_windows:
+                neighbor_lists[w].append(np.nan)
         else:
             msf_list.append(match.iloc[0]["msf"])
             msf_z_list.append(match.iloc[0]["msf_z"])
             is_interface_list.append(bool(match.iloc[0]["is_interface"]))
+            for w in neighbor_windows:
+                neighbor_lists[w].append(_neighbor_msf(anm_df, row["resnum"], w))
 
     skempi = skempi.copy()
     skempi["msf"]          = msf_list
     skempi["msf_z"]        = msf_z_list
     skempi["is_interface"] = is_interface_list
+    for w in neighbor_windows:
+        skempi[f"msf_z_neighbors_{w}"] = neighbor_lists[w]
 
     log.info("Flexibility assigned: %d/%d mutations have ANM scores, %d at interface",
              skempi["msf"].notna().sum(), len(skempi), skempi["is_interface"].sum())

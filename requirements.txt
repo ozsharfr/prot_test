@@ -28,3 +28,8 @@ seaborn>=0.13
 # --- Utilities ---
 requests>=2.28         # fallback PDB download if BioPython fails
 tqdm>=4.65             # progress bars for long FoldX batch runs
+
+# --- Machine learning ---
+scikit-learn>=1.4
+
+pyarrow>=14.0

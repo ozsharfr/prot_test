@@ -18,7 +18,9 @@ FOLDX_WORK_DIR = Path("data/foldx_runs")
 RESULTS_DIR    = Path("results")
 FIGURES_DIR    = Path("results/figures")
 
-PILOT_PDB_IDS =['1CHO', '1R0R', '1PPF', '3BT1', '3SGB']
+PILOT_PDB_IDS =['3SGB' , '3S9D','1JTG' ,'1AO7','2FTL','1A22','1JRH', '1CHO', '1R0R', '1PPF', 
+                '3BT1', '3SE3','2NZ9','3HFM','1BRS','4BFI','2WPT','2JEL','1CBW',
+                '4RS1','3EQS','3MZG','1DAN','3QDG','3BN9']
     # "1CSE",   # Subtilisin / eglin c — many SKEMPI entries, classic benchmark
     # "1VFB",   # Antibody / lysozyme — good interface, canonical test case
     # "1A22",   # Human growth hormone / receptor — well-studied, good mutation coverage
