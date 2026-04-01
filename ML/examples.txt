@@ -1,0 +1,5 @@
+python regressor.py --target prediction_error          # where does FoldX fail?
+python regressor.py --target DDG                       # predict real binding
+python regressor.py --target DDG --include-foldx       # predict real binding, using FoldX as one feature
+
+python calssifier.py --target prediction_error      # where does FoldX fail?

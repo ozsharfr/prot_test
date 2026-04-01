@@ -184,61 +184,76 @@ def add_location_features(df: pd.DataFrame) -> pd.DataFrame:
 def add_structural_features(df: pd.DataFrame, pdb_paths: dict) -> pd.DataFrame:
     """
     Add B-factor and distance to interface centroid from PDB structure files.
+    Parses each PDB once and caches: residue lookups and interface centroids
+    are pre-computed per (pdb_id, chain) rather than re-read per mutation row.
     Requires: biopython, numpy
     """
     from Bio.PDB import PDBParser
     parser = PDBParser(QUIET=True)
     df = df.copy()
 
+    # --- Cache structures and pre-compute per-(pdb_id, chain) lookups ---
+    struct_cache    = {}   # pdb_id -> BioPython model
+    centroid_cache  = {}   # (pdb_id, chain) -> centroid array or None
+    bfactor_cache   = {}   # (pdb_id, chain, resnum) -> float
+
+    for pdb_id, pdb_path in pdb_paths.items():
+        if not Path(pdb_path).exists():
+            continue
+        try:
+            structure = parser.get_structure(pdb_id, str(pdb_path))
+            struct_cache[pdb_id] = structure[0]
+        except Exception as e:
+            log.debug("Failed to parse %s: %s", pdb_id, e)
+
+    # Pre-compute interface centroids per (pdb_id, chain)
+    for pdb_id, model in struct_cache.items():
+        for chain in model.get_chains():
+            partner_ca = np.array([
+                a.get_vector().get_array()
+                for c in model.get_chains() if c.id != chain.id
+                for r in c.get_residues()
+                for a in r.get_atoms()
+                if a.get_name() == "CA"
+            ])
+            centroid_cache[(pdb_id, chain.id)] = (
+                partner_ca.mean(axis=0) if len(partner_ca) > 0 else None
+            )
+
+    # Pre-compute B-factors per (pdb_id, chain, resnum)
+    for pdb_id, model in struct_cache.items():
+        for chain in model.get_chains():
+            for residue in chain.get_residues():
+                if residue.get_id()[0] != " ":
+                    continue  # skip HETATM
+                resnum = residue.get_id()[1]
+                atoms  = [a.get_bfactor() for a in residue.get_atoms()
+                          if a.get_name() in ("CA", "N", "C", "O")]
+                if atoms:
+                    bfactor_cache[(pdb_id, chain.id, resnum)] = float(np.mean(atoms))
+
+    # --- Assign features per mutation row using caches ---
     b_factors  = []
     dist_to_if = []
 
     for _, row in df.iterrows():
-        pdb_path = pdb_paths.get(row["pdb_id"])
-        if pdb_path is None or not Path(pdb_path).exists():
-            b_factors.append(np.nan)
-            dist_to_if.append(np.nan)
-            continue
+        pdb_id = row["pdb_id"]
+        chain  = row["chain"]
+        resnum = int(row["resnum"])
 
-        try:
-            structure = parser.get_structure(row["pdb_id"], str(pdb_path))
-            model     = structure[0]
-            chain     = model[row["chain"]]
-            resnum    = int(row["resnum"])
+        # B-factor
+        b_factors.append(bfactor_cache.get((pdb_id, chain, resnum), np.nan))
 
-            # B-factor — mean over backbone atoms of the mutated residue
+        # Distance to interface centroid
+        centroid = centroid_cache.get((pdb_id, chain))
+        if centroid is not None:
+            model = struct_cache.get(pdb_id)
             try:
-                residue = chain[resnum]
-                bf = np.mean([a.get_bfactor() for a in residue.get_atoms()
-                              if a.get_name() in ("CA", "N", "C", "O")])
-                b_factors.append(float(bf))
-            except (KeyError, ValueError):
-                b_factors.append(np.nan)
-
-            # Distance to interface centroid (partner chain Cα centroid)
-            try:
-                partner_chains = [c for c in model.get_chains()
-                                  if c.id != row["chain"]]
-                if partner_chains:
-                    partner_coords = np.array([
-                        a.get_vector().get_array()
-                        for pc in partner_chains
-                        for r in pc.get_residues()
-                        for a in r.get_atoms()
-                        if a.get_name() == "CA"
-                    ])
-                    centroid = partner_coords.mean(axis=0)
-                    res_ca   = chain[resnum]["CA"].get_vector().get_array()
-                    dist_to_if.append(float(np.linalg.norm(res_ca - centroid)))
-                else:
-                    dist_to_if.append(np.nan)
+                res_ca = model[chain][resnum]["CA"].get_vector().get_array()
+                dist_to_if.append(float(np.linalg.norm(res_ca - centroid)))
             except Exception:
                 dist_to_if.append(np.nan)
-
-        except Exception as e:
-            log.debug("Structural features failed for %s/%s%d: %s",
-                      row["pdb_id"], row["chain"], row["resnum"], e)
-            b_factors.append(np.nan)
+        else:
             dist_to_if.append(np.nan)
 
     df["b_factor"]          = b_factors
