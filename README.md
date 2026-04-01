@@ -1,16 +1,34 @@
 # Beyond the Static Structure
-## Predicting Functional Shifts in Protein Ensembles
+## Positional Context and Conformational Flexibility in Protein-Protein Binding Prediction
 
-A computational pipeline for testing the hypothesis that **conformational flexibility is the missing link in ΔΔG prediction**: regions of proteins that are structurally flexible tend to be predicted less accurately by static energy models like FoldX.
+A computational pipeline for studying the role of **structural flexibility and positional context in ΔΔG prediction** — whether flexibility at interface residues explains binding effects and FoldX prediction error, and whether positional knowledge enables computational mutational scanning.
 
 ---
 
-## Scientific Goal
+## Scientific Background
 
-Standard binding affinity predictors (FoldX, Rosetta) assume a single rigid structure. This project tests whether prediction error correlates with structural flexibility, using ANM-derived flexibility scores and crystallographic B-factors as proxies.
+Standard binding affinity predictors (FoldX, Rosetta) assume a single rigid structure. Flexible regions at protein-protein interfaces may violate this assumption in ways that systematically bias predictions. This project quantifies:
 
-**Core hypothesis:**  
-*Mutations at flexible interface residues have higher FoldX ΔΔG prediction error than mutations at rigid residues.*
+1. How much structural flexibility explains FoldX prediction error
+2. How well experimental binding effects (DDG) can be classified from biophysical features
+3. Whether positional context enables computational prediction of untested substitutions at a site
+
+**Features used:**
+- **ANM (Anisotropic Normal Mode Analysis)** — per-residue MSF and ±2/4 neighbourhood averages
+- **Crystallographic B-factors** — experimental flexibility proxy at residue and protein level
+- **Physicochemical mutation properties** — volume, hydrophobicity, charge, BLOSUM62 (signed and absolute)
+- **Interface location** — INT/COR/RIM/SUR/SUP from SKEMPI
+- **Protein-level structural features** — chain count, residue count, interface size and fraction
+
+**Data:** SKEMPI 2.0 — curated database of protein-protein binding mutations with experimental ΔΔG.
+
+---
+
+## Key Finding
+
+> **Positional context is the dominant predictor of both binding effect and FoldX error.** Once some information is available about a residue position — from a few experimental measurements or from structural features — additional substitutions at that site can be screened computationally with meaningful accuracy. Flexibility features, particularly neighbourhood MSF, encode much of this positional context.
+
+See `RESULTS.md` for full results and interpretation.
 
 ---
 
@@ -24,20 +42,22 @@ prot_test/
 ├── structures.py          # Fetch PDB structures from RCSB
 ├── flexibility.py         # ANM flexibility scoring via ProDy
 ├── foldx.py               # FoldX RepairPDB + BuildModel wrappers
-├── analysis.py            # Statistics, per-structure plots
+├── analysis.py            # Statistics and per-structure plots
 ├── features.py            # Feature extraction (mutation + structural + protein-level)
 ├── find_candidates.py     # Screen SKEMPI for best candidate complexes
 ├── ML/
-│   └── regressor.py       # Random Forest regressor + classifier with LOPO CV
+│   ├── common.py          # Shared: data loading, CV, plotting, feature importance
+│   ├── regressor.py       # RF + Ridge regressor with LOPO and per-structure CV
+│   └── classifier.py      # RF classifier with LOPO and per-structure CV
 ├── data/
 │   ├── skempi_v2.csv      # Download from life.bsc.es/pid/skempi2
-│   └── structures/        # PDB files (auto-fetched)
+│   └── structures/        # PDB files (auto-fetched by pipeline)
 └── results/
-    ├── <PDB_ID>.csv        # Per-structure results (used for resume)
-    ├── mutations_combined.csv
-    ├── feature_matrix_<target>.parquet
+    ├── <PDB_ID>.csv                      # Per-structure results (resume-safe)
+    ├── feature_matrix_<target>.parquet   # Feature matrix for inspection/reuse
     ├── feature_importances_<target>.csv
-    ├── lopo_cv_results_<target>.csv
+    ├── lopo_cv_<target>.csv
+    ├── per_structure_cv_<target>.csv
     └── figures/
 ```
 
@@ -47,16 +67,15 @@ prot_test/
 
 ### 1. Python environment
 
-```bash
+```cmd
 python -m venv .venv
-.venv\Scripts\activate        # Windows
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
 ### 2. FoldX binary
 
-Register for a free academic license at https://foldxsuite.crg.eu  
-Download the binary, then update `config.py`:
+Register for a free academic license at https://foldxsuite.crg.eu and download the binary. Update `config.py`:
 
 ```python
 FOLDX_BIN = Path(r"C:\path\to\foldx_XXXXXXXX.exe")
@@ -64,114 +83,101 @@ FOLDX_BIN = Path(r"C:\path\to\foldx_XXXXXXXX.exe")
 
 ### 3. SKEMPI 2.0 dataset
 
-Download `skempi_v2.csv` from https://life.bsc.es/pid/skempi2  
-Place it at `data/skempi_v2.csv`.
+Download `skempi_v2.csv` from https://life.bsc.es/pid/skempi2 and place at `data/skempi_v2.csv`.
 
 ---
 
-## Phase 1: Flexibility vs. FoldX Error
+## Phase 1 — Pipeline
 
 ### Find candidate structures
 
-```bash
+```cmd
 python find_candidates.py
 ```
 
-Scores SKEMPI complexes by mutation count, DDG spread, and mean B-factor.  
-Paste the suggested `PILOT_PDB_IDS` into `config.py`.
+Scores SKEMPI complexes by mutation count, DDG spread, and mean B-factor. Paste suggested `PILOT_PDB_IDS` into `config.py`.
 
 ### Run the pipeline
 
-```bash
+```cmd
 python pipeline.py
 ```
 
 For each complex in `PILOT_PDB_IDS`:
+
 1. Filters SKEMPI for single-point mutations at the interface
 2. Downloads PDB structure from RCSB
-3. Runs ANM (ProDy) → per-residue MSF flexibility scores (z-scored within chain)
+3. Runs ANM (ProDy) → per-residue MSF z-scores + ±2/4 neighbourhood averages
 4. Runs FoldX RepairPDB + BuildModel → predicted ΔΔG
-5. Calibrates FoldX globally against experimental values → prediction error
-6. Correlates flexibility with error (Spearman + Mann-Whitney)
-7. Saves `results/<PDB_ID>.csv` and per-structure figures
+5. Calibrates predictions globally → `prediction_error = |calibrated − experimental|`
+6. Saves `results/<PDB_ID>.csv` — skips completed structures on rerun
 
-**Resume behaviour:** if `results/<PDB_ID>.csv` exists, that structure is skipped.  
-To force rerun: `del results\<PDB_ID>.csv`
+**To force rerun a structure:** `del results\<PDB_ID>.csv`
 
-### Key config options (`config.py`)
+### Key config options
 
 | Parameter | Default | Description |
 |---|---|---|
 | `PILOT_PDB_IDS` | `["1A22", ...]` | Structures to process. `None` = all SKEMPI |
-| `RESOLUTION_CUTOFF` | `4.0` Å | Max crystal resolution |
-| `INTERFACE_CUTOFF` | `8.0` Å | Cα distance to partner for interface definition |
-| `ANM_MODES` | `10` | Number of slowest modes for MSF |
-| `SKIP_FOLDX` | `False` | Use `\|DDG_exp\|` as target instead of FoldX error |
+| `RESOLUTION_CUTOFF` | `4.0` Å | Maximum crystal resolution |
+| `INTERFACE_CUTOFF` | `8.0` Å | Cα distance to partner chain for interface definition |
+| `ANM_MODES` | `10` | Number of slowest normal modes for MSF |
+| `SKIP_FOLDX` | `False` | Skip FoldX, use experimental DDG as target only |
 
 ---
 
-## Phase 2: Machine Learning
+## Phase 2 — Machine Learning
 
-### Run regressor + classifier
+### Run the models
 
-```bash
+```cmd
 cd ML
 python regressor.py --target prediction_error
 python regressor.py --target DDG
-python regressor.py --target DDG --include-foldx
+python classifier.py --target prediction_error
+python classifier.py --target DDG
 ```
 
-**Validation:** Leave-One-Protein-Out (LOPO) CV — trains on all structures except one, tests on held-out. Tests whether the model generalises to unseen proteins.
+### Validation strategy
 
-**Features used (34 total):**
+Three evaluations are reported for every model:
+
+**1. Leave-One-Protein-Out (LOPO) CV**
+Trains on all structures except one, tests on the held-out protein. The strictest test — measures generalisation to unseen protein families.
+
+**2. Naive per-structure KFold CV** *(leakage baseline)*
+Within each protein, mutations are randomly split across folds. Inflated by same-position leakage.
+
+**3. Position-grouped per-structure CV** *(main within-protein evaluation)*
+Within each protein, mutations at the same residue position are always kept in the same fold (GroupKFold by `resnum`). The gap between naive and position-grouped accuracy quantifies the value of positional information.
+
+### Features (34 total)
 
 | Category | Features |
 |---|---|
-| Flexibility | `msf_z`, `msf_z_neighbors_2/4`, `abs_msf_z`, `abs_msf_z_neighbors_2/4` |
-| Mutation (signed) | `volume_change`, `hydrophobicity_change`, `charge_change`, `blosum62` |
-| Mutation (absolute) | `abs_volume_change`, `abs_hydrophobicity_change`, `abs_charge_change`, `abs_blosum62` |
+| Flexibility (ANM) | `msf_z`, `msf_z_neighbors_2/4`, `abs_msf_z`, `abs_msf_z_neighbors_2/4` |
+| Mutation — signed | `volume_change`, `hydrophobicity_change`, `charge_change`, `blosum62` |
+| Mutation — absolute | `abs_volume_change`, `abs_hydrophobicity_change`, `abs_charge_change`, `abs_blosum62` |
 | Mutation flags | `is_to_gly/pro/ala/cys`, `is_from_gly/pro` |
 | Interface location | `location_INT/COR/RIM/SUR/SUP` |
 | Residue structural | `b_factor`, `dist_to_interface` |
 | Protein-level | `prot_n_chains`, `prot_n_residues`, `prot_mean/std/max_bfactor`, `prot_n_interface_residues`, `prot_frac_interface` |
 
-**Classification thresholds (prediction_error):**
-- `< 0.5 kcal/mol` → accurate
-- `0.5–1.5 kcal/mol` → moderate_error  
-- `> 1.5 kcal/mol` → large_error
+### Classification thresholds
 
-**Classification thresholds (DDG):**
-- `< -0.5 kcal/mol` → stabilising
-- `-0.5 to +0.5 kcal/mol` → neutral
-- `> +0.5 kcal/mol` → destabilising
+**`prediction_error`:** accurate < 0.5, moderate_error 0.5–1.5, large_error > 1.5 kcal/mol
 
-### Outputs
+**`DDG`:** stabilising < −0.5, neutral −0.5 to +0.5, destabilising > +0.5 kcal/mol
+
+### Output files
 
 | File | Contents |
 |---|---|
-| `results/feature_matrix_<target>.parquet` | Full feature matrix for inspection |
+| `results/feature_matrix_<target>.parquet` | Full feature matrix (X + target + pdb_id) |
 | `results/feature_importances_<target>.csv` | Permutation + impurity importances |
-| `results/lopo_cv_results_<target>.csv` | Per-fold LOPO regression results |
-| `results/per_structure_cv_<target>.csv` | Within-protein CV results |
-| `results/figures/feature_importances_<target>.png` | Importance bar charts |
-| `results/figures/lopo_cv_<target>.png` | LOPO R² per protein |
-| `results/figures/lopo_predictions_<target>.png` | Predicted vs actual scatter |
-| `results/figures/confusion_clf_<target>.png` | Confusion matrices |
-
----
-
-## Key Findings (pilot: 8 structures, 937 mutations)
-
-**Top features for predicting FoldX error (permutation importance):**
-1. `msf_z` (0.215) — ANM flexibility at mutated residue
-2. `b_factor` (0.124) — crystallographic flexibility
-3. `prot_frac_interface` (0.092) — fraction of protein at interface
-4. `prot_mean_bfactor` (0.062) — overall protein flexibility
-
-**LOPO CV:** mean R² ≈ −1.1 — model does not generalise across proteins  
-**Per-structure CV:** R² = 0.15–0.47 for most structures — real signal within each protein
-
-The gap between LOPO and per-structure performance indicates that the flexibility–error relationship is partly protein-family-specific. The top two features (`msf_z` and `b_factor`) consistently support the flexibility hypothesis within proteins, but different protein families require different calibrations.
+| `results/lopo_cv_<target>.csv` | Per-fold LOPO results |
+| `results/per_structure_cv_<target>.csv` | Position-grouped per-structure CV results |
+| `results/figures/` | All plots |
 
 ---
 
@@ -180,16 +186,16 @@ The gap between LOPO and per-structure performance indicates that the flexibilit
 | Package | Purpose |
 |---|---|
 | `prody` | ANM normal mode analysis |
-| `biopython` | PDB parsing, structure manipulation |
-| `pandas`, `numpy`, `scipy` | Data and statistics |
-| `scikit-learn` | Random Forest, Logistic Regression, CV |
-| `matplotlib`, `seaborn` | Plotting |
+| `biopython` | PDB parsing and structure manipulation |
+| `pandas`, `numpy`, `scipy` | Data processing and statistics |
+| `scikit-learn` | Random Forest, Ridge, GroupKFold CV, permutation importance |
+| `matplotlib` | Plotting |
 | `pyarrow` | Parquet file I/O |
-| FoldX binary | ΔΔG prediction (external, free academic) |
+| FoldX binary | ΔΔG prediction (external, free academic license) |
 
 ---
 
 ## Citation
 
-If using SKEMPI 2.0:  
+If using SKEMPI 2.0:
 Jankauskaite et al. (2019) *Bioinformatics* 35(3):462–469. https://doi.org/10.1093/bioinformatics/bty635
